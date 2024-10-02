@@ -33,11 +33,29 @@ class PlayerControllerMinimax(PlayerController):
 
     def __init__(self):
         super(PlayerControllerMinimax, self).__init__()
-        self.MAX_DEPTH = 3
-        self.floor = 1e100
-        self.gamma = 1
+        self.MAX_DEPTH = 7
+
+        self.alpha = 3 # Multiplier of difference of scores
+        self.beta = 2  # Multiplier of difference of caught fish scores
+        self.gamma = 0.1 # Decaying factor for larger depths
+        self.threshold = 0.065 # Time limit
 
         self.max_depth = 1
+        self.table = {}
+
+    def encode_state(self, current_node):
+        player = current_node.state.get_player()
+        fish_positions = current_node.state.get_fish_positions().values()
+        fish_scores = current_node.state.get_fish_scores().values()
+        hooks_coords = current_node.state.get_hook_positions()
+        (our_hook_x, our_hook_y) = hooks_coords[0]
+        (their_hook_x, their_hook_y) = hooks_coords[1]
+
+        encoding = str(player) + "_" + str(our_hook_x) + "_" + str(our_hook_y) + "_" + str(their_hook_x) + "_" + str(their_hook_y)
+        fish = sorted(zip(fish_positions, fish_scores), key = lambda x: (x[0], x[1]))
+        for elem in fish:
+            encoding += "_" + str(elem[0][0]) + "_" + str(elem[0][1]) + "_" + str(elem[1])
+        return encoding
 
     def player_loop(self):
         """
@@ -70,91 +88,102 @@ class PlayerControllerMinimax(PlayerController):
         :rtype: str
         """
 
-        # EDIT THIS METHOD TO RETURN BEST NEXT POSSIBLE MODE USING MINIMAX ###
+        self.start = time()
+        self.out_of_time = False
+        self.best_values = {0:0, 1:0, 2:0, 3:0, 4:0}
+        self.child_indices = [0, 1, 2, 3, 4]
 
-        # NOTE: Don't forget to initialize the children of the current node
-        #       with its compute_and_get_children() method!
+        next_move = self.init_minimax_ids(initial_tree_node)
 
-        start = time()
-        next_move = self.init_minimax(initial_tree_node)
-        # random_move = random.randrange(5)
-        end = time()
-        eprint((end-start) * 1000, " miliseconds.")
         return ACTION_TO_STR[next_move]
     
-    def init_minimax(self, root):
+    def init_minimax_ids(self, root):
         root.compute_and_get_children()
-        global_scores = [0 for _ in range(len(root.children))]
-        for max_depth in range(1,self.MAX_DEPTH):
-            self.max_depth = max_depth
-            scores = []
-            alpha = -float('inf')
-            beta = float('inf')
-            for idx, child in enumerate(root.children):
-                scores.append(self.minimax(child, 1, alpha, beta))
-                global_scores[idx] += self.gamma / max_depth * scores[idx]
-            eprint("Max_Depth: ", max_depth)
-            eprint(scores)
-        best_child = global_scores.index(max(global_scores))
-        eprint(global_scores)
-        eprint("Index: ", best_child, " Movement: ", ACTION_TO_STR[root.children[best_child].move])
-        return root.children[best_child].move
+        best_index = 0
+        if len(root.children) > 1:
+            for max_depth in range(1,self.MAX_DEPTH+1):
+                self.max_depth = max_depth
+                alpha = -float('inf')
+                beta = float('inf')
+                for idx in self.child_indices:
+                    child = root.children[idx]
+                    v = self.minimax(child, 1, alpha, beta, idx)
+                    self.best_values[idx] += v
+                    best_index = list(self.best_values.values()).index(max(list(self.best_values.values())))
+                    if self.out_of_time:
+                        break
+                if self.out_of_time:
+                    break
+                self.child_indices = sorted(self.child_indices, key=lambda x : -self.best_values[x])
+        return root.children[best_index].move
     
-    def minimax(self, current_node, current_depth, alpha, beta):
-        if current_depth == self.max_depth or len(current_node.state.get_fish_positions()) == 0:
-            # eprint("Final Depth: " + str(current_depth))
-            return self.heuristic(current_node)
+    def minimax(self, current_node, current_depth, alpha, beta, index):
+        self.current_time = time()
+        if current_depth == self.max_depth or (len(current_node.state.get_fish_positions()) == 1 and current_node.state.get_caught() != (None, None)):
+            val = self.heuristic(current_node, current_depth)
+            return val
+        elif (self.current_time - self.start) > self.threshold:
+            self.out_of_time = True
+            return self.best_values[index]     
         else:
-            current_node.compute_and_get_children()
-            if current_node.state.get_player() == 0: # MAX
-                best = -float('inf')
-                for child in current_node.children:
-                    v = self.minimax(child, current_depth+1, alpha, beta)
-                    best = max(best, v)
-                    alpha = max(alpha, best)
-                    if beta <= alpha:
-                        break
-            else: # MIN
-                best = float('inf')
-                for child in current_node.children:
-                    v = self.minimax(child, current_depth+1, alpha, beta)
-                    best = min(best,v)
-                    beta = min(beta, best)
-                    if beta <= alpha:
-                        break
-            return best
-
-    def heuristic(self, current_node):
+            encoding = self.encode_state(current_node)
+            remaining_depth = self.max_depth - current_depth
+            if encoding in self.table and self.table[encoding][1] == remaining_depth:
+                return self.table[encoding][0]
+            else:
+                current_node.compute_and_get_children()
+                if current_node.state.get_player() == 0: # MAX
+                    best = -float('inf')
+                    for child in current_node.children:
+                        v = self.minimax(child, current_depth+1, alpha, beta, index)
+                        best = max(best, v)
+                        alpha = max(alpha, best)
+                        if beta <= alpha:
+                            break
+                else: # MIN
+                    best = float('inf')
+                    for child in current_node.children:
+                        v = self.minimax(child, current_depth+1, alpha, beta, index)
+                        best = min(best,v)
+                        beta = min(beta, best)
+                        if beta <= alpha:
+                            break
+                    self.table[encoding] = (best, self.max_depth - current_depth)
+                return best
+    
+    def heuristic(self, current_node, depth):
         fish_positions = current_node.state.get_fish_positions()
         fish_scores = current_node.state.get_fish_scores()
         hook_positions = current_node.state.get_hook_positions()
-        # scores = current_node.state.get_player_scores()
-        # max_score = 0
-        
-        sum_scores = 0
-        hook_x, hook_y = hook_positions[0]
-        other_hook_x, other_hook_y = hook_positions[1]
-        eprint("Entering for loop, move: ", ACTION_TO_STR[current_node.move])
-        for idx in fish_positions.keys():
-            fish_x, fish_y = fish_positions[idx]
-            if not(fish_x == other_hook_x and fish_y == other_hook_y):
-                fish_score = fish_scores[idx]
-                # L1 Norm
-                diff_x = abs(fish_x - hook_x)
-                diff_y = abs(fish_y - hook_y)
-                sum_diff = diff_x + diff_y
-                if sum_diff == 0:
-                    score = fish_score * self.floor
-                else:
-                    if fish_score < 0:
-                        score = fish_score * sum_diff
-                    else:
-                        score = fish_score / sum_diff
-                sum_scores += score
-                eprint("Fish score: ", fish_score, ", L1 Distance:", sum_diff, ", Index: ", idx, ", Score: ", score)
-                # if max_score < score:
-                    # max_score = score
-        return sum_scores
+        (our_score, their_score) = current_node.state.get_player_scores()
+        our_hook = hook_positions[0]
+        their_hook = hook_positions[1]
+
+        our_position_term, our_caught_fish = self.compute_position_term(fish_positions, fish_scores, our_hook)
+        their_position_term, their_caught_fish = self.compute_position_term(fish_positions, fish_scores, their_hook)
+
+        return ((our_position_term - their_position_term) + self.alpha*(our_score - their_score) + self.beta*(our_caught_fish - their_caught_fish)) * (1 - depth*self.gamma)
+
+    def compute_position_term(self, fish_positions, fish_scores, hook_coord):
+        acc = 0
+        caught_fish = 0
+        for fish in fish_positions:
+            score = fish_scores[fish]
+            fish_coord = fish_positions[fish]
+            dist = self.L1_wrapping(fish_coord, hook_coord)
+            if dist != 0:
+                acc += score / dist
+            else:
+                caught_fish = score
+        return acc, caught_fish
+    
+    def L1_wrapping(self, fish_coord, hook_cord):
+        x_diff = abs(fish_coord[0] - hook_cord[0])
+        y_diff = abs(fish_coord[1] - hook_cord[1])
+        half_width = 10
+        if x_diff > half_width:
+            x_diff = 2 * half_width - x_diff
+        return x_diff + y_diff
 
 
 
